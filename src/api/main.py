@@ -395,7 +395,13 @@ async def get_system_stats():
 # FIXED: Proper port binding for Render deployment
 if __name__ == "__main__":
     import uvicorn
-    # Use Render's PORT environment variable with fallback
+    # Railway uses PORT environment variable
     port = int(os.environ.get("PORT", 8000))
-    logger.info(f"🚀 Starting server on host=0.0.0.0 port={port}")
-    uvicorn.run(app, host="0.0.0.0", port=port, log_level="info")
+    logger.info(f"🚀 Starting CardioQA on port {port}")
+    uvicorn.run(
+        app, 
+        host="0.0.0.0", 
+        port=port,
+        log_level="info"
+    )
+
