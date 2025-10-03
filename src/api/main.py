@@ -1,5 +1,5 @@
 """
-CardioQA FastAPI Backend - FIXED VERSION
+CardioQA FastAPI Backend - RENDER DEPLOYMENT VERSION
 Production-ready API for cardiac diagnostic assistant
 Author: Novonil Basak
 """
@@ -18,8 +18,8 @@ from typing import List, Optional
 import time
 from dotenv import load_dotenv
 
-# Load environment variables
-load_dotenv("../../.env")  # Load from root directory
+# Load environment variables (for local development)
+load_dotenv("../../.env")
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -121,20 +121,46 @@ class MedicalSafetyValidator:
 
 @app.on_event("startup")
 async def startup_event():
-    """Initialize models and database"""
+    """Initialize models and database - FIXED FOR RENDER DEPLOYMENT"""
     global collection, embedding_model, gemini_model, safety_validator
     
     logger.info("🫀 Starting CardioQA API...")
     
     try:
-        # Load vector database from root directory
-        db_path = "../../chroma_db"
-        logger.info(f"Looking for database at: {Path(db_path).absolute()}")
+        # FIXED: Try multiple database paths for different deployment environments
+        possible_paths = [
+            "/opt/render/project/src/chroma_db",  # Render deployment
+            "chroma_db",                          # Root directory
+            "./chroma_db",                        # Current directory
+            "../../chroma_db",                    # Local development
+            "../chroma_db"                        # Alternative local path
+        ]
         
-        if not Path(db_path).exists():
-            logger.error(f"❌ Database not found at {db_path}")
-            raise Exception("ChromaDB not found - run the notebooks first!")
+        db_path = None
+        for path in possible_paths:
+            logger.info(f"🔍 Checking database path: {path}")
+            if Path(path).exists():
+                db_path = path
+                logger.info(f"✅ Found database at: {path}")
+                break
         
+        if not db_path:
+            # Debug: List what's actually available
+            current_dir = Path.cwd()
+            logger.info(f"📂 Current directory: {current_dir}")
+            logger.info(f"📋 Directory contents: {list(current_dir.iterdir())}")
+            
+            # Try to find any chroma_db directory
+            for item in current_dir.rglob("chroma_db"):
+                if item.is_dir():
+                    logger.info(f"🔍 Found chroma_db at: {item}")
+                    db_path = str(item)
+                    break
+            
+            if not db_path:
+                raise Exception("ChromaDB not found in any expected location")
+        
+        # Initialize ChromaDB
         client = chromadb.PersistentClient(path=db_path)
         collection = client.get_collection(name="cardiac_knowledge")
         logger.info(f"✅ Loaded vector database: {collection.count()} documents")
@@ -143,13 +169,11 @@ async def startup_event():
         embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
         logger.info("✅ Loaded embedding model")
         
-        # Configure Gemini
+        # SECURE: Configure Gemini with environment variable only
         api_key = os.getenv("GEMINI_API_KEY")
         if not api_key:
-            logger.error("❌ GEMINI_API_KEY not found in environment")
-            # Try hardcoded for testing
-            api_key = "AIzaSyDG8JAqtiA6wqeypFoyNziduq7DYKWGu78"
-            logger.info("Using hardcoded API key for testing")
+            logger.error("❌ GEMINI_API_KEY not found in environment variables")
+            raise Exception("Missing Gemini API key - set GEMINI_API_KEY environment variable")
         
         genai.configure(api_key=api_key)
         gemini_model = genai.GenerativeModel('gemini-2.0-flash')
@@ -179,7 +203,8 @@ async def health_check():
             "status": "healthy",
             "database_count": db_count,
             "model_status": model_status,
-            "api_version": "1.0.0"
+            "api_version": "1.0.0",
+            "deployment": "render"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
@@ -265,6 +290,21 @@ Provide helpful, evidence-based information with proper **bold** formatting for 
         
     except Exception as e:
         logger.error(f"Query error: {str(e)}")
+        raise HTTPException(status_code=500, detail=str(e))
+
+@app.get("/stats")
+async def get_system_stats():
+    """Get system statistics"""
+    try:
+        return {
+            "total_documents": collection.count() if collection else 0,
+            "embedding_model": "all-MiniLM-L6-v2",
+            "llm_model": "gemini-2.0-flash",
+            "specialty": "cardiology",
+            "safety_features": ["emergency_detection", "professional_consultation", "medical_disclaimers"],
+            "deployment_platform": "render"
+        }
+    except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 if __name__ == "__main__":
