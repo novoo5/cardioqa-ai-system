@@ -1,0 +1,15 @@
+services:
+  - type: web
+    name: cardioqa-backend
+    env: python
+    region: oregon
+    plan: free
+    buildCommand: "pip install -r requirements.txt"
+    startCommand: "python src/api/main.py"
+    envVars:
+      - key: GEMINI_API_KEY
+        value: AIzaSyDG8JAqtiA6wqeypFoyNziduq7DYKWGu78
+      - key: PYTHONPATH
+        value: /opt/render/project/src
+    healthCheckPath: /health
+    autoDeploy: false

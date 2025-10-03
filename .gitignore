@@ -1,0 +1,42 @@
+# Python
+__pycache__/
+*.py[cod]
+*$py.class
+*.so
+.Python
+venv/
+env/
+.env
+*.log
+
+# Data files (keep some, ignore others)
+data/raw/*.csv
+data/raw/*.json
+!data/raw/.gitkeep
+
+# Models and logs
+logs/*
+!logs/.gitkeep
+
+# IDE
+.vscode/
+.idea/
+*.swp
+*.swo
+
+# Jupyter
+.ipynb_checkpoints/
+
+# Next.js frontend
+cardioqa-frontend/.next/
+cardioqa-frontend/node_modules/
+cardioqa-frontend/.env*.local
+cardioqa-frontend/out/
+
+# OS generated files
+.DS_Store
+Thumbs.db
+
+# Don't ignore these for deployment
+!chroma_db/
+!data/processed/

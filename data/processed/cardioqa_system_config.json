@@ -1,0 +1,17 @@
+{
+  "created_date": "2025-10-02T18:00:23.978687",
+  "total_documents": 364,
+  "embedding_model": "all-MiniLM-L6-v2",
+  "llm_model": "gemini-2.0-flash",
+  "vector_db_path": "../chroma_db",
+  "safety_features": [
+    "emergency_detection",
+    "professional_consultation",
+    "medical_disclaimers"
+  ],
+  "performance_metrics": {
+    "avg_response_time": "2-3 seconds",
+    "safety_validation": "enabled",
+    "confidence_scoring": "enabled"
+  }
+}

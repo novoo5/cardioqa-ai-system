@@ -1,0 +1,10 @@
+{
+  "vector_db_path": "../chroma_db",
+  "collection_name": "cardiac_knowledge",
+  "embedding_model": "all-MiniLM-L6-v2",
+  "embedding_dimension": 384,
+  "total_documents": 364,
+  "data_source": "MedQuAD",
+  "specialty": "cardiology",
+  "created_date": "2025-10-02T17:33:34.943956"
+}
