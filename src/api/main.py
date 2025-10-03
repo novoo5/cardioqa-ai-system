@@ -1,29 +1,32 @@
 """
-CardioQA FastAPI Backend - RENDER DEPLOYMENT VERSION
-Production-ready API for cardiac diagnostic assistant
+CardioQA FastAPI Backend - PRODUCTION RENDER VERSION
+AI-powered cardiac diagnostic assistant with RAG
 Author: Novonil Basak
 """
 
-from fastapi import FastAPI, HTTPException, BackgroundTasks
+import os
+import logging
+import time
+from pathlib import Path
+from typing import List, Optional
+from contextlib import asynccontextmanager
+
+from fastapi import FastAPI, HTTPException
 from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import chromadb
 from sentence_transformers import SentenceTransformer
 import google.generativeai as genai
-import json
-import logging
-import os
-from pathlib import Path
-from typing import List, Optional
-import time
-from dotenv import load_dotenv
-
-# Load environment variables (for local development)
-load_dotenv("../../.env")
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
 logger = logging.getLogger(__name__)
+
+# Global variables
+collection = None
+embedding_model = None
+gemini_model = None
+safety_validator = None
 
 # Pydantic models
 class QueryRequest(BaseModel):
@@ -39,11 +42,147 @@ class QueryResponse(BaseModel):
     warnings: List[str]
     response_time: float
 
-# Initialize FastAPI app
+class MedicalSafetyValidator:
+    """Medical safety validation system"""
+    
+    def __init__(self):
+        self.emergency_keywords = [
+            'heart attack', 'chest pain', 'shortness of breath', 'stroke',
+            'severe pain', 'bleeding', 'unconscious', 'emergency', 'crushing pain'
+        ]
+    
+    def validate_response(self, response_text: str, user_query: str) -> dict:
+        """Validate medical safety of AI response"""
+        safety_score = 85  # Start at 85
+        warnings = []
+        
+        # Check for emergency situations
+        if any(keyword in user_query.lower() for keyword in self.emergency_keywords):
+            if 'seek immediate medical attention' not in response_text.lower():
+                warnings.append("CRITICAL: Emergency situation detected")
+                safety_score -= 20
+            else:
+                safety_score += 10
+        
+        # Check for professional consultation recommendation
+        consult_phrases = ['consult', 'doctor', 'physician', 'healthcare provider']
+        if any(phrase in response_text.lower() for phrase in consult_phrases):
+            safety_score += 10
+        else:
+            warnings.append("Added professional consultation recommendation")
+            safety_score -= 15
+        
+        # Check response quality
+        if len(response_text) > 200:
+            safety_score += 5
+        
+        # Check for dangerous statements
+        dangerous_phrases = ['you definitely have', 'this is certainly', 'never see a doctor']
+        if any(phrase in response_text.lower() for phrase in dangerous_phrases):
+            warnings.append("Contains potentially dangerous medical statements")
+            safety_score -= 25
+        
+        safety_score = min(100, max(50, safety_score))
+        
+        return {
+            'safety_score': safety_score,
+            'warnings': warnings,
+            'is_safe': safety_score >= 70
+        }
+    
+    def add_safety_disclaimers(self, response_text: str, safety_check: dict) -> str:
+        """Add medical disclaimers"""
+        disclaimers = "\n\n⚠️ **MEDICAL DISCLAIMER**: Educational purposes only.\n👨‍⚕️ **RECOMMENDATION**: Consult healthcare professionals."
+        
+        if safety_check['safety_score'] < 80:
+            disclaimers += "\n🚨 **IMPORTANT**: For severe symptoms, seek immediate medical attention."
+        
+        return response_text + disclaimers
+
+@asynccontextmanager
+async def lifespan(app: FastAPI):
+    """Initialize and cleanup application resources"""
+    global collection, embedding_model, gemini_model, safety_validator
+    
+    logger.info("🫀 Starting CardioQA API...")
+    
+    try:
+        # Find ChromaDB in deployment environment
+        possible_paths = [
+            "./chroma_db",
+            "chroma_db", 
+            "/opt/render/project/src/chroma_db",
+            Path.cwd() / "chroma_db",
+            Path(__file__).parent.parent.parent / "chroma_db"
+        ]
+        
+        db_path = None
+        for path in possible_paths:
+            path_obj = Path(path)
+            logger.info(f"🔍 Checking: {path_obj.absolute()}")
+            if path_obj.exists() and path_obj.is_dir():
+                db_path = str(path_obj)
+                logger.info(f"✅ Found ChromaDB at: {db_path}")
+                break
+        
+        if not db_path:
+            # Debug current environment
+            current_dir = Path.cwd()
+            logger.info(f"📂 Current working directory: {current_dir}")
+            logger.info(f"📋 Files in current directory: {[f.name for f in current_dir.iterdir()]}")
+            
+            # Search recursively for chroma_db
+            for chroma_path in current_dir.rglob("chroma_db"):
+                if chroma_path.is_dir():
+                    logger.info(f"🔍 Found chroma_db via search: {chroma_path}")
+                    db_path = str(chroma_path)
+                    break
+            
+            if not db_path:
+                raise Exception(f"ChromaDB not found. Searched in: {[str(p) for p in possible_paths]}")
+        
+        # Initialize ChromaDB
+        client = chromadb.PersistentClient(path=db_path)
+        collection = client.get_collection(name="cardiac_knowledge")
+        logger.info(f"✅ Loaded vector database: {collection.count()} documents")
+        
+        # Load embedding model
+        embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
+        logger.info("✅ Loaded embedding model")
+        
+        # Configure Gemini API
+        api_key = os.getenv("GEMINI_API_KEY")
+        if not api_key:
+            raise Exception("❌ GEMINI_API_KEY environment variable not set")
+        
+        genai.configure(api_key=api_key)
+        gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+        
+        # Test Gemini connection
+        test_response = gemini_model.generate_content("Say 'CardioQA API ready!'")
+        logger.info(f"✅ Gemini test: {test_response.text}")
+        
+        # Initialize safety validator
+        safety_validator = MedicalSafetyValidator()
+        logger.info("✅ Safety validator ready")
+        
+        logger.info("🎉 CardioQA API fully initialized!")
+        
+        yield
+        
+    except Exception as e:
+        logger.error(f"❌ Startup failed: {str(e)}")
+        raise
+    
+    # Cleanup (if needed)
+    logger.info("🔄 Shutting down CardioQA API...")
+
+# Initialize FastAPI with lifespan
 app = FastAPI(
     title="CardioQA API",
     description="AI-powered cardiac diagnostic assistant with RAG",
-    version="1.0.0"
+    version="1.0.0",
+    lifespan=lifespan
 )
 
 # Add CORS middleware
@@ -55,142 +194,19 @@ app.add_middleware(
     allow_headers=["*"],
 )
 
-# Global variables
-collection = None
-embedding_model = None
-gemini_model = None
-safety_validator = None
-
-class MedicalSafetyValidator:
-    """Medical safety validation - FIXED VERSION"""
-    
-    def __init__(self):
-        self.emergency_keywords = [
-            'heart attack', 'chest pain', 'shortness of breath', 'stroke',
-            'severe pain', 'bleeding', 'unconscious', 'emergency', 'crushing pain'
-        ]
-    
-    def validate_response(self, response_text: str, user_query: str) -> dict:
-        """Validate medical safety of AI response - FIXED SCORING"""
-        safety_score = 85  # Start at 85 instead of 100
-        warnings = []
-        
-        # Check for emergency situations
-        if any(keyword in user_query.lower() for keyword in self.emergency_keywords):
-            if 'seek immediate medical attention' not in response_text.lower():
-                warnings.append("CRITICAL: Emergency situation detected")
-                safety_score -= 20
-            else:
-                safety_score += 10  # Bonus for including emergency advice
-        
-        # Check for professional consultation recommendation
-        consult_phrases = ['consult', 'doctor', 'physician', 'healthcare provider']
-        if any(phrase in response_text.lower() for phrase in consult_phrases):
-            safety_score += 10  # Bonus for recommending consultation
-        else:
-            warnings.append("Added professional consultation recommendation")
-            safety_score -= 15
-        
-        # Check response quality and detail
-        if len(response_text) > 200:
-            safety_score += 5  # Bonus for detailed responses
-        
-        # Check for dangerous absolute statements
-        dangerous_phrases = ['you definitely have', 'this is certainly', 'never see a doctor']
-        if any(phrase in response_text.lower() for phrase in dangerous_phrases):
-            warnings.append("Contains potentially dangerous medical statements")
-            safety_score -= 25
-        
-        # Ensure score stays in reasonable range
-        safety_score = min(100, max(50, safety_score))
-        
-        return {
-            'safety_score': safety_score,
-            'warnings': warnings,
-            'is_safe': safety_score >= 70
+@app.get("/")
+async def root():
+    """API root endpoint"""
+    return {
+        "message": "CardioQA API - AI-Powered Cardiac Diagnostic Assistant",
+        "version": "1.0.0",
+        "endpoints": {
+            "health": "/health",
+            "query": "/query",
+            "docs": "/docs",
+            "stats": "/stats"
         }
-    
-    def add_safety_disclaimers(self, response_text: str, safety_check: dict) -> str:
-        """Add medical disclaimers to response"""
-        disclaimers = "\n\n⚠️ **MEDICAL DISCLAIMER**: Educational purposes only.\n👨‍⚕️ **RECOMMENDATION**: Consult healthcare professionals."
-        
-        if safety_check['safety_score'] < 80:
-            disclaimers += "\n🚨 **IMPORTANT**: For severe symptoms, seek immediate medical attention."
-        
-        return response_text + disclaimers
-
-@app.on_event("startup")
-async def startup_event():
-    """Initialize models and database - FIXED FOR RENDER DEPLOYMENT"""
-    global collection, embedding_model, gemini_model, safety_validator
-    
-    logger.info("🫀 Starting CardioQA API...")
-    
-    try:
-        # FIXED: Try multiple database paths for different deployment environments
-        possible_paths = [
-            "/opt/render/project/src/chroma_db",  # Render deployment
-            "chroma_db",                          # Root directory
-            "./chroma_db",                        # Current directory
-            "../../chroma_db",                    # Local development
-            "../chroma_db"                        # Alternative local path
-        ]
-        
-        db_path = None
-        for path in possible_paths:
-            logger.info(f"🔍 Checking database path: {path}")
-            if Path(path).exists():
-                db_path = path
-                logger.info(f"✅ Found database at: {path}")
-                break
-        
-        if not db_path:
-            # Debug: List what's actually available
-            current_dir = Path.cwd()
-            logger.info(f"📂 Current directory: {current_dir}")
-            logger.info(f"📋 Directory contents: {list(current_dir.iterdir())}")
-            
-            # Try to find any chroma_db directory
-            for item in current_dir.rglob("chroma_db"):
-                if item.is_dir():
-                    logger.info(f"🔍 Found chroma_db at: {item}")
-                    db_path = str(item)
-                    break
-            
-            if not db_path:
-                raise Exception("ChromaDB not found in any expected location")
-        
-        # Initialize ChromaDB
-        client = chromadb.PersistentClient(path=db_path)
-        collection = client.get_collection(name="cardiac_knowledge")
-        logger.info(f"✅ Loaded vector database: {collection.count()} documents")
-        
-        # Load embedding model
-        embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
-        logger.info("✅ Loaded embedding model")
-        
-        # SECURE: Configure Gemini with environment variable only
-        api_key = os.getenv("GEMINI_API_KEY")
-        if not api_key:
-            logger.error("❌ GEMINI_API_KEY not found in environment variables")
-            raise Exception("Missing Gemini API key - set GEMINI_API_KEY environment variable")
-        
-        genai.configure(api_key=api_key)
-        gemini_model = genai.GenerativeModel('gemini-2.0-flash')
-        
-        # Test Gemini connection
-        test_response = gemini_model.generate_content("Say 'API ready!'")
-        logger.info(f"✅ Gemini test: {test_response.text}")
-        
-        # Initialize safety validator
-        safety_validator = MedicalSafetyValidator()
-        logger.info("✅ Safety validator ready")
-        
-        logger.info("🎉 CardioQA API fully initialized!")
-        
-    except Exception as e:
-        logger.error(f"❌ Startup failed: {str(e)}")
-        raise
+    }
 
 @app.get("/health")
 async def health_check():
@@ -204,18 +220,21 @@ async def health_check():
             "database_count": db_count,
             "model_status": model_status,
             "api_version": "1.0.0",
-            "deployment": "render"
+            "deployment": "production"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
 @app.post("/query", response_model=QueryResponse)
 async def query_cardioqa(request: QueryRequest):
-    """Main CardioQA query endpoint - FIXED CONFIDENCE CALCULATION"""
+    """Main CardioQA query endpoint"""
     start_time = time.time()
     
     try:
-        logger.info(f"Processing query: {request.query}")
+        if not collection or not gemini_model or not safety_validator:
+            raise HTTPException(status_code=503, detail="System not fully initialized")
+        
+        logger.info(f"Processing query: {request.query[:100]}...")
         
         # Search knowledge base
         results = collection.query(
@@ -224,13 +243,13 @@ async def query_cardioqa(request: QueryRequest):
         )
         
         if not results['documents'][0]:
-            raise HTTPException(status_code=404, detail="No relevant information found")
+            raise HTTPException(status_code=404, detail="No relevant cardiac information found")
         
-        # Format context
+        # Format knowledge context
         knowledge_context = []
         for doc, metadata, distance in zip(
             results['documents'][0],
-            results['metadatas'][0],
+            results['metadatas'][0], 
             results['distances'][0]
         ):
             knowledge_context.append({
@@ -239,43 +258,49 @@ async def query_cardioqa(request: QueryRequest):
                 'similarity': 1 - distance
             })
         
-        # Create enhanced prompt
+        # Create medical prompt
         context_text = f"Medical Evidence:\nQ: {knowledge_context[0]['question']}\nA: {knowledge_context[0]['answer']}"
         
-        prompt = f"""You are CardioQA, a cardiac health assistant.
+        prompt = f"""You are CardioQA, a specialized cardiac health assistant.
 
-RULES:
+MEDICAL RESPONSE RULES:
 - Never provide definitive diagnoses
-- Always recommend consulting doctors
-- Use **bold** for important points
-- Be educational and helpful
-- Format with clear headings using **
+- Always recommend consulting healthcare professionals
+- Use **bold** for important medical points
+- Be educational and evidence-based
+- Include appropriate medical caution
 
-Question: {request.query}
+USER QUESTION: {request.query}
+
 {context_text}
 
-Provide helpful, evidence-based information with proper **bold** formatting for key points:"""
+Provide a helpful, evidence-based response with proper **bold** formatting:"""
         
-        # Generate response
-        response = gemini_model.generate_content(prompt)
+        # Generate AI response
+        response = gemini_model.generate_content(
+            prompt,
+            generation_config={
+                'temperature': 0.1,
+                'max_output_tokens': 800,
+            }
+        )
         ai_response = response.text
         
         # Apply safety validation
         safety_check = safety_validator.validate_response(ai_response, request.query)
         safe_response = safety_validator.add_safety_disclaimers(ai_response, safety_check)
         
-        # FIXED CONFIDENCE CALCULATION
+        # Calculate confidence level
         similarity = knowledge_context[0]['similarity']
         if similarity > 0.6:
             confidence = 'High'
         elif similarity > 0.4:
-            confidence = 'Medium' 
+            confidence = 'Medium'
         elif similarity > 0.2:
             confidence = 'Low'
         else:
             confidence = 'Very Low'
         
-        # Return response
         response_time = time.time() - start_time
         
         return QueryResponse(
@@ -288,25 +313,33 @@ Provide helpful, evidence-based information with proper **bold** formatting for 
             response_time=round(response_time, 2)
         )
         
+    except HTTPException:
+        raise
     except Exception as e:
-        logger.error(f"Query error: {str(e)}")
-        raise HTTPException(status_code=500, detail=str(e))
+        logger.error(f"Query processing error: {str(e)}")
+        raise HTTPException(status_code=500, detail=f"Processing error: {str(e)}")
 
 @app.get("/stats")
 async def get_system_stats():
-    """Get system statistics"""
+    """System statistics endpoint"""
     try:
         return {
             "total_documents": collection.count() if collection else 0,
             "embedding_model": "all-MiniLM-L6-v2",
             "llm_model": "gemini-2.0-flash",
             "specialty": "cardiology",
-            "safety_features": ["emergency_detection", "professional_consultation", "medical_disclaimers"],
-            "deployment_platform": "render"
+            "safety_features": [
+                "emergency_detection",
+                "professional_consultation", 
+                "medical_disclaimers",
+                "confidence_scoring"
+            ],
+            "deployment": "render-production"
         }
     except Exception as e:
         raise HTTPException(status_code=500, detail=str(e))
 
+# For local development
 if __name__ == "__main__":
     import uvicorn
-    uvicorn.run(app, host="0.0.0.0", port=8000)
+    uvicorn.run(app, host="0.0.0.0", port=8000, reload=False)
