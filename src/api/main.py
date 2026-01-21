@@ -1,5 +1,5 @@
 """
-CardioQA FastAPI Backend - PRODUCTION VERSION
+CardioQA FastAPI Backend - PRODUCTION VERSION with Groq
 AI-powered cardiac diagnostic assistant with RAG
 Author: Novonil Basak
 """
@@ -16,7 +16,7 @@ from fastapi.middleware.cors import CORSMiddleware
 from pydantic import BaseModel, Field
 import chromadb
 from sentence_transformers import SentenceTransformer
-import google.generativeai as genai
+from groq import Groq  # CHANGED: Import Groq instead of Google
 
 # Setup logging
 logging.basicConfig(level=logging.INFO)
@@ -25,7 +25,7 @@ logger = logging.getLogger(__name__)
 # Global variables
 collection = None
 embedding_model = None
-gemini_model = None
+groq_client = None  # CHANGED: Renamed from gemini_model
 safety_validator = None
 
 # Pydantic models
@@ -102,12 +102,12 @@ class MedicalSafetyValidator:
 @asynccontextmanager
 async def lifespan(app: FastAPI):
     """Initialize and cleanup application resources"""
-    global collection, embedding_model, gemini_model, safety_validator
+    global collection, embedding_model, groq_client, safety_validator  # CHANGED: groq_client
     
     logger.info("🫀 Starting CardioQA API...")
     
     try:
-        # FIXED: Force ChromaDB to create new compatible database
+        # Database initialization (same as before)
         possible_paths = [
             "./chroma_db",
             "chroma_db", 
@@ -126,11 +126,8 @@ async def lifespan(app: FastAPI):
                 break
         
         if not db_path:
-            # Create new ChromaDB if not found
             logger.info("📁 Creating new ChromaDB...")
             db_path = "./chroma_db_render"
-            
-            # Initialize new ChromaDB and recreate collection
             client = chromadb.PersistentClient(path=db_path)
             try:
                 collection = client.get_collection(name="cardiac_knowledge")
@@ -139,7 +136,6 @@ async def lifespan(app: FastAPI):
                 logger.info("Creating new collection with sample data...")
                 collection = client.create_collection(name="cardiac_knowledge")
                 
-                # Add sample cardiac Q&A data for demo
                 sample_data = [
                     {
                         "question": "What are the symptoms of heart attack?",
@@ -171,18 +167,15 @@ async def lifespan(app: FastAPI):
                 
                 logger.info(f"✅ Created collection with {len(sample_data)} sample documents")
         else:
-            # Try to use existing database
             try:
                 client = chromadb.PersistentClient(path=db_path)
                 collection = client.get_collection(name="cardiac_knowledge")
                 logger.info(f"✅ Loaded existing database: {collection.count()} documents")
             except Exception as e:
                 logger.error(f"❌ ChromaDB compatibility issue: {e}")
-                # Fallback: create new database
                 logger.info("Creating fallback database...")
                 client = chromadb.PersistentClient(path="./chroma_db_fallback")
                 collection = client.create_collection(name="cardiac_knowledge")
-                # Add sample data (same as above)
                 sample_data = [
                     {
                         "question": "What are the symptoms of heart attack?",
@@ -201,17 +194,20 @@ async def lifespan(app: FastAPI):
         embedding_model = SentenceTransformer('all-MiniLM-L6-v2')
         logger.info("✅ Loaded embedding model")
         
-        # Configure Gemini API
-        api_key = os.getenv("GEMINI_API_KEY")
+        # CHANGED: Configure Groq API instead of Gemini
+        api_key = os.getenv("GROQ_API_KEY")
         if not api_key:
-            raise Exception("❌ GEMINI_API_KEY environment variable not set")
+            raise Exception("❌ GROQ_API_KEY environment variable not set")
         
-        genai.configure(api_key=api_key)
-        gemini_model = genai.GenerativeModel('gemini-2.0-flash')
+        groq_client = Groq(api_key=api_key)
         
-        # Test Gemini connection
-        test_response = gemini_model.generate_content("Say 'CardioQA ready!'")
-        logger.info(f"✅ Gemini test: {test_response.text}")
+        # CHANGED: Test Groq connection
+        test_response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",
+            messages=[{"role": "user", "content": "Say 'CardioQA ready!'"}],
+            max_tokens=50
+        )
+        logger.info(f"✅ Groq test: {test_response.choices[0].message.content}")
         
         # Initialize safety validator
         safety_validator = MedicalSafetyValidator()
@@ -225,7 +221,6 @@ async def lifespan(app: FastAPI):
         logger.error(f"❌ Startup failed: {str(e)}")
         raise
     
-    # Cleanup
     logger.info("🔄 Shutting down CardioQA API...")
 
 # Initialize FastAPI with lifespan
@@ -265,7 +260,7 @@ async def health_check():
     """Health check endpoint"""
     try:
         db_count = collection.count() if collection else 0
-        model_status = "ready" if gemini_model else "not loaded"
+        model_status = "ready" if groq_client else "not loaded"  # CHANGED
         
         return {
             "status": "healthy",
@@ -283,7 +278,7 @@ async def query_cardioqa(request: QueryRequest):
     start_time = time.time()
     
     try:
-        if not collection or not gemini_model or not safety_validator:
+        if not collection or not groq_client or not safety_validator:  # CHANGED
             raise HTTPException(status_code=503, detail="System not fully initialized")
         
         logger.info(f"Processing query: {request.query[:100]}...")
@@ -328,15 +323,17 @@ USER QUESTION: {request.query}
 
 Provide a helpful, evidence-based response with proper **bold** formatting:"""
         
-        # Generate AI response
-        response = gemini_model.generate_content(
-            prompt,
-            generation_config={
-                'temperature': 0.1,
-                'max_output_tokens': 800,
-            }
+        # CHANGED: Generate AI response using Groq
+        response = groq_client.chat.completions.create(
+            model="llama-3.3-70b-versatile",  # or "mixtral-8x7b-32768"
+            messages=[
+                {"role": "system", "content": "You are CardioQA, a specialized cardiac health assistant providing educational medical information."},
+                {"role": "user", "content": prompt}
+            ],
+            temperature=0.1,
+            max_tokens=800,
         )
-        ai_response = response.text
+        ai_response = response.choices[0].message.content
         
         # Apply safety validation
         safety_check = safety_validator.validate_response(ai_response, request.query)
@@ -378,7 +375,7 @@ async def get_system_stats():
         return {
             "total_documents": collection.count() if collection else 0,
             "embedding_model": "all-MiniLM-L6-v2",
-            "llm_model": "gemini-2.0-flash",
+            "llm_model": "llama-3.3-70b-versatile",  # CHANGED
             "specialty": "cardiology",
             "safety_features": [
                 "emergency_detection",
@@ -395,7 +392,6 @@ async def get_system_stats():
 # FIXED: Proper port binding for Render deployment
 if __name__ == "__main__":
     import uvicorn
-    # Railway uses PORT environment variable
     port = int(os.environ.get("PORT", 8000))
     logger.info(f"🚀 Starting CardioQA on port {port}")
     uvicorn.run(
@@ -404,4 +400,3 @@ if __name__ == "__main__":
         port=port,
         log_level="info"
     )
-
